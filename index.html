@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jadon's Interleaving Scheduler</title>
+    <style>
+        :root {
+            --bg: #0D0F17;
+            --card: #1A1E2C;
+            --text: #DCDFEB;
+            --accent-blue: #009DFF;   /* WORKING */
+            --accent-orange: #FF9800; /* READY */
+            --accent-green: #00E676;  /* DONE */
+            --accent-purple: #BB86FC; /* RESTING */
+            --accent-red: #FF5282;    /* SWITCHING */
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* --- UI Elements --- */
+        header {
+            height: 120px;
+            background: #1A1E2C;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border-bottom: 2px solid #2D3447;
+        }
+        #timer-display { font-size: 2.2rem; font-weight: bold; margin-bottom: 10px; }
+
+        button {
+            background: transparent;
+            color: var(--accent-orange);
+            border: 1px solid var(--accent-orange);
+            padding: 8px 16px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: 0.3s;
+        }
+        button:hover { background: rgba(255, 152, 0, 0.1); }
+
+        /* --- Layout --- */
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            height: calc(100vh - 120px);
+            padding: 20px;
+            gap: 20px;
+        }
+        .column { display: flex; flex-direction: column; gap: 15px; overflow-y: auto; }
+        .col-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 5px; border-bottom: 1px solid #2D3447; padding-bottom: 5px; }
+
+        /* --- Cards --- */
+        .card {
+            background: var(--card);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #2D3447;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .card.active-working { border: 2px solid var(--accent-blue); box-shadow: 0 0 10px var(--accent-blue); }
+        .card.active-switching { border: 2px solid var(--accent-red); box-shadow: 0 0 10px var(--accent-red); }
+        .card.active-resting { border: 2px solid var(--accent-purple); box-shadow: 0 0 10px var(--accent-purple); }
+
+        .card-name { font-weight: bold; margin-bottom: 8px; font-size: 1rem; }
+        .card-stats { font-size: 0.8rem; color: #8892B0; }
+
+        /* --- Modal (Popup) --- */
+        #modal {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: var(--card);
+            padding: 30px;
+            border: 2px solid var(--accent-orange);
+            z-index: 1000;
+            width: 350px;
+        }
+        #modal input {
+            width: 100%;
+            padding: 10px;
+            background: #0D0F17;
+            border: 1px solid #2D3447;
+            color: var(--text);
+            margin-bottom: 20px;
+            font-family: inherit;
+        }
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 999;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="modal-overlay" id="overlay"></div>
+    <div id="modal">
+        <p style="margin-bottom: 10px; color: var(--accent-orange);">$ add_task --input</p>
+        <input type="text" id="taskInput" placeholder="Assignment name..." autofocus>
+        <div style="display: flex; gap: 10px;">
+            <button onclick="addTask()">SUBMIT</button>
+            <button onclick="closeModal()" style="color: #8892B0; border-color: #8892B0;">CANCEL</button>
+        </div>
+    </div>
+
+    <header>
+        <div id="timer-display">SYSTEM_IDLE</div>
+        <button onclick="openModal()">+ NEW_ASSIGNMENT</button>
+    </header>
+
+    <div class="container">
+        <div class="column" id="ready-col">
+            <div class="col-title" style="color: var(--accent-orange)">READY QUEUE</div>
+        </div>
+        <div class="column" id="running-col">
+            <div class="col-title" style="color: var(--accent-blue)">CURRENT ACTION</div>
+        </div>
+        <div class="column" id="done-col">
+            <div class="col-title" style="color: var(--accent-green)">COMPLETED</div>
+        </div>
+    </div>
+
+    <script>
+        let readyQ = [];
+        let runningTask = null;
+        let haltedQ = [];
+        let elapsed = 0;
+        let state = "IDLE";
+
+        const WORK_LIMIT = 15 * 60;
+        const SWITCH_LIMIT = 1 * 60;
+        const BIG_REST_LIMIT = 15 * 60;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playBeep() {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+        }
+
+        // --- Modal Logic ---
+        function openModal() {
+            document.getElementById('modal').style.display = 'block';
+            document.getElementById('overlay').style.display = 'block';
+            document.getElementById('taskInput').focus();
+        }
+        function closeModal() {
+            document.getElementById('modal').style.display = 'none';
+            document.getElementById('overlay').style.display = 'none';
+            document.getElementById('taskInput').value = '';
+        }
+        function addTask() {
+            const val = document.getElementById('taskInput').value.trim();
+            if (val) {
+                readyQ.push({ id: Date.now(), name: val, totalSeconds: 0, isRest: false });
+                render();
+                closeModal();
+            }
+        }
+
+        // --- Core Logic ---
+        function tick() {
+            if (state === "IDLE" && readyQ.length > 0) dispatchNext();
+
+            if (runningTask) {
+                elapsed++;
+                runningTask.totalSeconds++;
+
+                let limit = (state === "SWITCHING") ? SWITCH_LIMIT : (runningTask.isRest ? BIG_REST_LIMIT : WORK_LIMIT);
+
+                if (elapsed >= limit) {
+                    playBeep();
+                    if (state === "WORKING") {
+                        state = "SWITCHING";
+                        elapsed = 0;
+                    } else {
+                        contextSwitch();
+                    }
+                }
+                render();
+            }
+        }
+
+        function dispatchNext() {
+            if (readyQ.length === 0) return;
+            runningTask = readyQ.shift();
+            elapsed = 0;
+            state = runningTask.isRest ? "RESTING" : "WORKING";
+        }
+
+        function contextSwitch() {
+            readyQ.push(runningTask);
+            runningTask = null;
+            dispatchNext();
+        }
+
+        function completeTask(id) {
+            if (runningTask && runningTask.id === id) {
+                haltedQ.push(runningTask);
+                runningTask = null;
+                state = "IDLE";
+            } else {
+                const idx = readyQ.findIndex(t => t.id === id);
+                if (idx !== -1) haltedQ.push(readyQ.splice(idx, 1)[0]);
+            }
+            render();
+        }
+
+        function render() {
+            const timerEl = document.getElementById('timer-display');
+            const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+            const s = (elapsed % 60).toString().padStart(2, '0');
+            timerEl.innerText = state === "IDLE" ? "ADD TASK TO START" : `${state}: ${m}:${s}`;
+            timerEl.style.color = `var(--accent-${state.toLowerCase()})`;
+
+            const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
+            Object.keys(cols).forEach(colId => {
+                const col = document.getElementById(colId);
+                while (col.children.length > 1) col.removeChild(col.lastChild);
+                cols[colId].forEach(t => {
+                    const card = createCard(t);
+                    if (colId === 'running-col') card.classList.add(`active-${state.toLowerCase()}`);
+                    col.appendChild(card);
+                });
+            });
+        }
+
+        function createCard(task) {
+            const div = document.createElement('div');
+            div.className = 'card';
+            div.onclick = () => completeTask(task.id);
+            div.innerHTML = `<div class="card-name">${task.name}</div><div class="card-stats">Logged: ${Math.floor(task.totalSeconds/60)}m</div>`;
+            return div;
+        }
+
+        // Automatic "Big Rest" after you've added assignments
+        setInterval(tick, 1000);
+
+        // Handle Enter key in modal
+        document.getElementById('taskInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') addTask();
+        });
+    </script>
+</body>
+</html>
