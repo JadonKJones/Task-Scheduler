@@ -86,15 +86,16 @@
             padding: 30px;
             border: 2px solid var(--accent-orange);
             z-index: 1000;
-            width: 350px;
+            width: 380px;
         }
+        .input-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; color: #8892B0; margin-bottom: 5px; }
         #modal input {
             width: 100%;
             padding: 10px;
             background: #0D0F17;
             border: 1px solid #2D3447;
             color: var(--text);
-            margin-bottom: 20px;
             font-family: inherit;
         }
         .modal-overlay {
@@ -110,9 +111,25 @@
 
     <div class="modal-overlay" id="overlay"></div>
     <div id="modal">
-        <p style="margin-bottom: 10px; color: var(--accent-orange);">$ add_task --input</p>
-        <input type="text" id="taskInput" placeholder="Assignment name..." autofocus>
+        <p style="margin-bottom: 15px; color: var(--accent-orange);">$ configure_new_task</p>
+
+        <div class="input-group">
+            <label>ASSIGNMENT NAME</label>
+            <input type="text" id="taskInput" placeholder="e.g. Calculus HW" autofocus>
+        </div>
+
         <div style="display: flex; gap: 10px;">
+            <div class="input-group">
+                <label>WORK (MINS)</label>
+                <input type="number" id="workMins" value="15" min="1">
+            </div>
+            <div class="input-group">
+                <label>REST (MINS)</label>
+                <input type="number" id="restMins" value="5" min="1">
+            </div>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-top: 10px;">
             <button onclick="addTask()">SUBMIT</button>
             <button onclick="closeModal()" style="color: #8892B0; border-color: #8892B0;">CANCEL</button>
         </div>
@@ -142,9 +159,8 @@
         let elapsed = 0;
         let state = "IDLE";
 
-        const WORK_LIMIT = 15 * 60;
-        const SWITCH_LIMIT = 1 * 60;
-        const BIG_REST_LIMIT = 15 * 60;
+        // Switch time remains short for the actual transition moment
+        const SWITCH_LIMIT = 60;
 
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         function playBeep() {
@@ -157,27 +173,37 @@
             osc.start(); osc.stop(audioCtx.currentTime + 0.5);
         }
 
-        // --- Modal Logic ---
         function openModal() {
             document.getElementById('modal').style.display = 'block';
             document.getElementById('overlay').style.display = 'block';
             document.getElementById('taskInput').focus();
         }
+
         function closeModal() {
             document.getElementById('modal').style.display = 'none';
             document.getElementById('overlay').style.display = 'none';
             document.getElementById('taskInput').value = '';
         }
+
         function addTask() {
-            const val = document.getElementById('taskInput').value.trim();
-            if (val) {
-                readyQ.push({ id: Date.now(), name: val, totalSeconds: 0, isRest: false });
+            const name = document.getElementById('taskInput').value.trim();
+            const workMins = parseInt(document.getElementById('workMins').value) || 15;
+            const restMins = parseInt(document.getElementById('restMins').value) || 5;
+
+            if (name) {
+                readyQ.push({
+                    id: Date.now(),
+                    name: name,
+                    totalSeconds: 0,
+                    workLimit: workMins * 60,
+                    restLimit: restMins * 60,
+                    isRest: false
+                });
                 render();
                 closeModal();
             }
         }
 
-        // --- Core Logic ---
         function tick() {
             if (state === "IDLE" && readyQ.length > 0) dispatchNext();
 
@@ -185,14 +211,27 @@
                 elapsed++;
                 runningTask.totalSeconds++;
 
-                let limit = (state === "SWITCHING") ? SWITCH_LIMIT : (runningTask.isRest ? BIG_REST_LIMIT : WORK_LIMIT);
+                let currentLimit;
+                if (state === "SWITCHING") {
+                    currentLimit = SWITCH_LIMIT;
+                } else if (state === "RESTING") {
+                    currentLimit = runningTask.restLimit;
+                } else {
+                    currentLimit = runningTask.workLimit;
+                }
 
-                if (elapsed >= limit) {
+                if (elapsed >= currentLimit) {
                     playBeep();
                     if (state === "WORKING") {
+                        // After work, we enter a brief "Switching" state before the assigned Rest
                         state = "SWITCHING";
                         elapsed = 0;
+                    } else if (state === "SWITCHING") {
+                        // After switching, we start the Rest
+                        state = "RESTING";
+                        elapsed = 0;
                     } else {
+                        // After rest, we put it back in queue and grab next
                         contextSwitch();
                     }
                 }
@@ -204,12 +243,13 @@
             if (readyQ.length === 0) return;
             runningTask = readyQ.shift();
             elapsed = 0;
-            state = runningTask.isRest ? "RESTING" : "WORKING";
+            state = "WORKING"; // Always start a task with work
         }
 
         function contextSwitch() {
             readyQ.push(runningTask);
             runningTask = null;
+            state = "IDLE";
             dispatchNext();
         }
 
@@ -229,8 +269,14 @@
             const timerEl = document.getElementById('timer-display');
             const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
             const s = (elapsed % 60).toString().padStart(2, '0');
-            timerEl.innerText = state === "IDLE" ? "ADD TASK TO START" : `${state}: ${m}:${s}`;
-            timerEl.style.color = `var(--accent-${state.toLowerCase()})`;
+
+            if (state === "IDLE") {
+                timerEl.innerText = "ADD TASK TO START";
+                timerEl.style.color = "var(--accent-orange)";
+            } else {
+                timerEl.innerText = `${state}: ${m}:${s}`;
+                timerEl.style.color = `var(--accent-${state.toLowerCase()})`;
+            }
 
             const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
             Object.keys(cols).forEach(colId => {
@@ -248,16 +294,20 @@
             const div = document.createElement('div');
             div.className = 'card';
             div.onclick = () => completeTask(task.id);
-            div.innerHTML = `<div class="card-name">${task.name}</div><div class="card-stats">Logged: ${Math.floor(task.totalSeconds/60)}m</div>`;
+            div.innerHTML = `
+                <div class="card-name">${task.name}</div>
+                <div class="card-stats">Cycle: ${task.workLimit/60}m work / ${task.restLimit/60}m rest</div>
+                <div class="card-stats">Logged: ${Math.floor(task.totalSeconds/60)}m</div>
+            `;
             return div;
         }
 
-        // Automatic "Big Rest" after you've added assignments
         setInterval(tick, 1000);
 
-        // Handle Enter key in modal
-        document.getElementById('taskInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') addTask();
+        document.querySelectorAll('#modal input').forEach(input => {
+            input.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') addTask();
+            });
         });
     </script>
 </body>
