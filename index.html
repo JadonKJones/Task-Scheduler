@@ -27,7 +27,7 @@
 
         /* --- UI Elements --- */
         header {
-            height: 120px;
+            height: 140px;
             background: #1A1E2C;
             display: flex;
             flex-direction: column;
@@ -37,6 +37,8 @@
         }
         #timer-display { font-size: 2.2rem; font-weight: bold; margin-bottom: 10px; }
 
+        .controls { display: flex; gap: 10px; }
+
         button {
             background: transparent;
             color: var(--accent-orange);
@@ -45,14 +47,16 @@
             cursor: pointer;
             font-family: inherit;
             transition: 0.3s;
+            text-transform: uppercase;
         }
         button:hover { background: rgba(255, 152, 0, 0.1); }
+        button.paused { color: var(--accent-red); border-color: var(--accent-red); }
 
         /* --- Layout --- */
         .container {
             display: grid;
             grid-template-columns: 1fr 1fr 1fr;
-            height: calc(100vh - 120px);
+            height: calc(100vh - 140px);
             padding: 20px;
             gap: 20px;
         }
@@ -75,7 +79,7 @@
         .card-name { font-weight: bold; margin-bottom: 8px; font-size: 1rem; }
         .card-stats { font-size: 0.8rem; color: #8892B0; }
 
-        /* --- Modal (Popup) --- */
+        /* --- Modal --- */
         #modal {
             display: none;
             position: fixed;
@@ -137,7 +141,10 @@
 
     <header>
         <div id="timer-display">SYSTEM_IDLE</div>
-        <button onclick="openModal()">+ NEW_ASSIGNMENT</button>
+        <div class="controls">
+            <button id="pause-btn" onclick="togglePause()">PAUSE_SYSTEM</button>
+            <button onclick="openModal()">+ NEW_ASSIGNMENT</button>
+        </div>
     </header>
 
     <div class="container">
@@ -158,19 +165,39 @@
         let haltedQ = [];
         let elapsed = 0;
         let state = "IDLE";
+        let isPaused = false;
 
-        // Switch time remains short for the actual transition moment
         const SWITCH_LIMIT = 60;
 
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // We initialize AudioContext on user interaction
+        let audioCtx;
+
         function playBeep() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
             osc.type = 'sine';
             osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
-            osc.connect(gain); gain.connect(audioCtx.destination);
-            osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+            // Longer beep for visibility
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1.5);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 1.5);
+        }
+
+        function togglePause() {
+            if (state === "IDLE") return;
+            isPaused = !isPaused;
+            const btn = document.getElementById('pause-btn');
+            btn.innerText = isPaused ? "RESUME_SYSTEM" : "PAUSE_SYSTEM";
+            btn.className = isPaused ? "paused" : "";
+            render();
         }
 
         function openModal() {
@@ -186,6 +213,9 @@
         }
 
         function addTask() {
+            // Unlocking audio on first interaction
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
             const name = document.getElementById('taskInput').value.trim();
             const workMins = parseInt(document.getElementById('workMins').value) || 15;
             const restMins = parseInt(document.getElementById('restMins').value) || 5;
@@ -205,6 +235,8 @@
         }
 
         function tick() {
+            if (isPaused) return;
+
             if (state === "IDLE" && readyQ.length > 0) dispatchNext();
 
             if (runningTask) {
@@ -223,15 +255,12 @@
                 if (elapsed >= currentLimit) {
                     playBeep();
                     if (state === "WORKING") {
-                        // After work, we enter a brief "Switching" state before the assigned Rest
                         state = "SWITCHING";
                         elapsed = 0;
                     } else if (state === "SWITCHING") {
-                        // After switching, we start the Rest
                         state = "RESTING";
                         elapsed = 0;
                     } else {
-                        // After rest, we put it back in queue and grab next
                         contextSwitch();
                     }
                 }
@@ -243,7 +272,10 @@
             if (readyQ.length === 0) return;
             runningTask = readyQ.shift();
             elapsed = 0;
-            state = "WORKING"; // Always start a task with work
+            state = "WORKING";
+            isPaused = false;
+            document.getElementById('pause-btn').innerText = "PAUSE_SYSTEM";
+            document.getElementById('pause-btn').className = "";
         }
 
         function contextSwitch() {
@@ -258,6 +290,7 @@
                 haltedQ.push(runningTask);
                 runningTask = null;
                 state = "IDLE";
+                isPaused = false;
             } else {
                 const idx = readyQ.findIndex(t => t.id === id);
                 if (idx !== -1) haltedQ.push(readyQ.splice(idx, 1)[0]);
@@ -274,8 +307,9 @@
                 timerEl.innerText = "ADD TASK TO START";
                 timerEl.style.color = "var(--accent-orange)";
             } else {
-                timerEl.innerText = `${state}: ${m}:${s}`;
-                timerEl.style.color = `var(--accent-${state.toLowerCase()})`;
+                let statusPrefix = isPaused ? "PAUSED" : state;
+                timerEl.innerText = `${statusPrefix}: ${m}:${s}`;
+                timerEl.style.color = isPaused ? "var(--accent-red)" : `var(--accent-${state.toLowerCase()})`;
             }
 
             const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
@@ -296,7 +330,7 @@
             div.onclick = () => completeTask(task.id);
             div.innerHTML = `
                 <div class="card-name">${task.name}</div>
-                <div class="card-stats">Cycle: ${task.workLimit/60}m work / ${task.restLimit/60}m rest</div>
+                <div class="card-stats">${task.workLimit/60}m work / ${task.restLimit/60}m rest</div>
                 <div class="card-stats">Logged: ${Math.floor(task.totalSeconds/60)}m</div>
             `;
             return div;
