@@ -169,7 +169,6 @@
 
         const SWITCH_LIMIT = 60;
 
-        // We initialize AudioContext on user interaction
         let audioCtx;
 
         function playBeep() {
@@ -180,7 +179,6 @@
             const gain = audioCtx.createGain();
             osc.type = 'sine';
             osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-            // Longer beep for visibility
             gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
             gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1.5);
 
@@ -213,7 +211,6 @@
         }
 
         function addTask() {
-            // Unlocking audio on first interaction
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
             const name = document.getElementById('taskInput').value.trim();
@@ -241,7 +238,7 @@
 
             if (runningTask) {
                 elapsed++;
-                runningTask.totalSeconds++;
+                if (state === "WORKING") runningTask.totalSeconds++;
 
                 let currentLimit;
                 if (state === "SWITCHING") {
@@ -300,16 +297,27 @@
 
         function render() {
             const timerEl = document.getElementById('timer-display');
-            const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
-            const s = (elapsed % 60).toString().padStart(2, '0');
+
+            let displayTime = elapsed;
+            if (state === "RESTING" && runningTask) {
+                displayTime = runningTask.restLimit - elapsed;
+            } else if (state === "SWITCHING") {
+                displayTime = SWITCH_LIMIT - elapsed;
+            }
+
+            const m = Math.floor(displayTime / 60).toString().padStart(2, '0');
+            const s = (displayTime % 60).toString().padStart(2, '0');
+            const timeStr = `${m}:${s}`;
 
             if (state === "IDLE") {
                 timerEl.innerText = "ADD TASK TO START";
                 timerEl.style.color = "var(--accent-orange)";
+                document.title = "IDLE | Scheduler";
             } else {
                 let statusPrefix = isPaused ? "PAUSED" : state;
-                timerEl.innerText = `${statusPrefix}: ${m}:${s}`;
+                timerEl.innerText = `${statusPrefix}: ${timeStr}`;
                 timerEl.style.color = isPaused ? "var(--accent-red)" : `var(--accent-${state.toLowerCase()})`;
+                document.title = `(${timeStr}) ${state}`;
             }
 
             const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
