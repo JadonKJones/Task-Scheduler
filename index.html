@@ -36,7 +36,6 @@
             border-bottom: 2px solid #2D3447;
         }
         #timer-display { font-size: 2.2rem; font-weight: bold; margin-bottom: 10px; }
-
         .controls { display: flex; gap: 10px; }
 
         button {
@@ -80,7 +79,7 @@
         .card-stats { font-size: 0.8rem; color: #8892B0; }
 
         /* --- Modal --- */
-        #modal {
+        #modal, #auth-modal {
             display: none;
             position: fixed;
             top: 50%;
@@ -94,7 +93,7 @@
         }
         .input-group { margin-bottom: 15px; }
         label { display: block; font-size: 0.8rem; color: #8892B0; margin-bottom: 5px; }
-        #modal input {
+        input {
             width: 100%;
             padding: 10px;
             background: #0D0F17;
@@ -113,15 +112,30 @@
 </head>
 <body>
 
-    <div class="modal-overlay" id="overlay"></div>
+    <div class="modal-overlay" id="overlay" style="display: block;"></div>
+
+    <div id="auth-modal" style="display: block;">
+        <p style="margin-bottom: 15px; color: var(--accent-orange);">$ authenticate_user</p>
+        <div class="input-group">
+            <label>EMAIL</label>
+            <input type="email" id="authEmail">
+        </div>
+        <div class="input-group">
+            <label>PASSWORD</label>
+            <input type="password" id="authPass">
+        </div>
+        <div style="display: flex; gap: 10px;">
+            <button onclick="handleAuth('login')">LOGIN</button>
+            <button onclick="handleAuth('signup')">SIGN_UP</button>
+        </div>
+    </div>
+
     <div id="modal">
         <p style="margin-bottom: 15px; color: var(--accent-orange);">$ configure_new_task</p>
-
         <div class="input-group">
             <label>ASSIGNMENT NAME</label>
             <input type="text" id="taskInput" placeholder="e.g. Calculus HW" autofocus>
         </div>
-
         <div style="display: flex; gap: 10px;">
             <div class="input-group">
                 <label>WORK (MINS)</label>
@@ -140,190 +154,213 @@
     </div>
 
     <header>
-        <div id="timer-display">SYSTEM_IDLE</div>
+        <div id="timer-display">AWAITING_AUTH</div>
         <div class="controls">
             <button id="pause-btn" onclick="togglePause()">PAUSE_SYSTEM</button>
             <button onclick="openModal()">+ NEW_ASSIGNMENT</button>
-            <button onclick="clearAllData()" style="color: var(--accent-red); border-color: var(--accent-red); font-size: 0.7rem;">WIPE_STORAGE</button>
+            <button onclick="signOut()" style="color: var(--accent-red); border-color: var(--accent-red);">LOGOUT</button>
         </div>
     </header>
 
     <div class="container">
-        <div class="column" id="ready-col">
-            <div class="col-title" style="color: var(--accent-orange)">READY QUEUE</div>
-        </div>
-        <div class="column" id="running-col">
-            <div class="col-title" style="color: var(--accent-blue)">CURRENT ACTION</div>
-        </div>
-        <div class="column" id="done-col">
-            <div class="col-title" style="color: var(--accent-green)">COMPLETED</div>
-        </div>
+        <div class="column" id="ready-col"><div class="col-title" style="color: var(--accent-orange)">READY QUEUE</div></div>
+        <div class="column" id="running-col"><div class="col-title" style="color: var(--accent-blue)">CURRENT ACTION</div></div>
+        <div class="column" id="done-col"><div class="col-title" style="color: var(--accent-green)">COMPLETED</div></div>
     </div>
 
     <script>
+        // --- CONFIGURATION ---
+        const SB_URL = 'https://pyebcryjwlpuyryyeitq.supabase.co';
+        const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5ZWJjcnlqd2xwdXlyeXllaXRxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAzODA3NTIsImV4cCI6MjA4NTk1Njc1Mn0.QxVfI1xGHc_OLj844iAeegGVEceG98mJ-vu0p1pbAVY';
+
+        const db = window.supabase.createClient(SB_URL, SB_KEY);
+
         let readyQ = [];
         let runningTask = null;
         let haltedQ = [];
         let elapsed = 0;
         let state = "IDLE";
         let isPaused = false;
-
         const SWITCH_LIMIT = 60;
         let audioCtx;
 
-        function saveToDisk() {
-            const data = {
-                readyQ,
-                runningTask,
-                haltedQ,
-                state,
-                elapsed
-            };
-            localStorage.setItem('interleavingData', JSON.stringify(data));
+        // --- AUTH LOGIC ---
+        async function handleAuth(type) {
+            const email = document.getElementById('authEmail').value.trim();
+            const password = document.getElementById('authPass').value.trim();
+
+            if (!email || !password) {
+                alert("Enter email and password.");
+                return;
+            }
+
+            const { data, error } = type === 'login'
+                ? await db.auth.signInWithPassword({ email, password })
+                : await db.auth.signUp({ email, password });
+
+            if (error) alert(error.message);
+            else checkUser();
         }
 
-        function loadFromDisk() {
-            const saved = localStorage.getItem('interleavingData');
-            if (saved) {
-                const data = JSON.parse(saved);
-                readyQ = data.readyQ || [];
-                runningTask = data.runningTask || null;
-                haltedQ = data.haltedQ || [];
-                state = data.state || "IDLE";
-                elapsed = data.elapsed || 0;
+        async function checkUser() {
+            const { data: { user } } = await db.auth.getUser();
+            if (user) {
+                document.getElementById('auth-modal').style.display = 'none';
+                document.getElementById('overlay').style.display = 'none';
+                syncFromCloud();
+            } else {
+                document.getElementById('auth-modal').style.display = 'block';
+                document.getElementById('overlay').style.display = 'block';
+            }
+        }
+
+        async function signOut() {
+            await db.auth.signOut();
+            location.reload();
+        }
+
+        // --- DATA LOGIC ---
+        async function syncFromCloud() {
+            const { data: tasks, error } = await db
+                .from('tasks')
+                .select('*')
+                .order('created_at', { ascending: true });
+
+            if (error) return console.error(error);
+
+            readyQ = tasks.filter(t => t.status === 'ready');
+            runningTask = tasks.find(t => t.status === 'running') || null;
+            haltedQ = tasks.filter(t => t.status === 'done');
+
+            if (runningTask && state === "IDLE") {
+                state = "WORKING";
+                elapsed = 0;
+            }
+            render();
+        }
+
+        async function updateTaskInDB(task, newStatus) {
+            await db
+                .from('tasks')
+                .update({ status: newStatus, total_seconds: task.total_seconds })
+                .eq('id', task.id);
+        }
+
+        async function addTask() {
+            const name = document.getElementById('taskInput').value.trim();
+            const workMins = parseInt(document.getElementById('workMins').value) || 15;
+            const restMins = parseInt(document.getElementById('restMins').value) || 5;
+
+            if (name) {
+                const { error } = await db.from('tasks').insert([{
+                    name: name,
+                    work_limit: workMins * 60,
+                    rest_limit: restMins * 60,
+                    status: 'ready',
+                    total_seconds: 0
+                }]);
+                if (!error) {
+                    await closeModal();
+                    syncFromCloud();
+                } else {
+                    alert(error.message);
+                }
+            }
+        }
+
+        // --- ENGINE ---
+        function tick() {
+            if (isPaused) return;
+
+            // Auto-dispatch if IDLE and work is available
+            if (state === "IDLE") {
+                if (readyQ.length > 0) {
+                    dispatchNext();
+                }
+                return;
+            }
+
+            if (runningTask) {
+                elapsed++;
+                if (state === "WORKING") {
+                    runningTask.total_seconds++;
+                    if (elapsed % 30 === 0) updateTaskInDB(runningTask, 'running');
+                }
+
+                let currentLimit = (state === "SWITCHING") ? SWITCH_LIMIT :
+                                   (state === "RESTING") ? runningTask.rest_limit :
+                                   runningTask.work_limit;
+
+                if (elapsed >= currentLimit) {
+                    playBeep();
+                    if (state === "WORKING") { state = "SWITCHING"; elapsed = 0; }
+                    else if (state === "SWITCHING") { state = "RESTING"; elapsed = 0; }
+                    else { contextSwitch(); }
+                }
                 render();
             }
         }
 
-        function clearAllData() {
-            if(confirm("Wipe all tasks and reset system?")) {
-                localStorage.removeItem('interleavingData');
-                location.reload();
-            }
+        async function dispatchNext() {
+            if (readyQ.length === 0) return;
+            runningTask = readyQ[0];
+            state = "WORKING";
+            elapsed = 0;
+            await updateTaskInDB(runningTask, 'running');
+            syncFromCloud();
         }
 
+        async function contextSwitch() {
+            if (!runningTask) return;
+            const task = runningTask;
+            runningTask = null;
+            state = "IDLE";
+            await updateTaskInDB(task, 'ready');
+            syncFromCloud();
+        }
+
+        async function completeTask(id) {
+            const task = (runningTask && runningTask.id === id) ? runningTask : readyQ.find(t => t.id === id);
+            if (!task) return;
+
+            await updateTaskInDB(task, 'done');
+            if (runningTask?.id === id) {
+                runningTask = null;
+                state = "IDLE";
+            }
+            syncFromCloud();
+        }
+
+        // --- UI HELPERS ---
         function playBeep() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-
-            const runBeep = (freq, dur) => {
-                const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'square';
-                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-                gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-                gain.gain.setValueAtTime(0.2, audioCtx.currentTime + dur - 0.1);
-                gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start();
-                osc.stop(audioCtx.currentTime + dur);
-            };
-
-            runBeep(880, 1.0);
-            setTimeout(() => runBeep(880, 0.5), 300);
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.5);
         }
 
         function togglePause() {
-            if (state === "IDLE") return;
             isPaused = !isPaused;
-            const btn = document.getElementById('pause-btn');
-            btn.innerText = isPaused ? "RESUME_SYSTEM" : "PAUSE_SYSTEM";
-            btn.className = isPaused ? "paused" : "";
             render();
         }
 
         function openModal() {
             document.getElementById('modal').style.display = 'block';
             document.getElementById('overlay').style.display = 'block';
-            document.getElementById('taskInput').focus();
         }
 
-        function closeModal() {
+        async function closeModal() {
             document.getElementById('modal').style.display = 'none';
-            document.getElementById('overlay').style.display = 'none';
-            document.getElementById('taskInput').value = '';
-        }
-
-        function addTask() {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const name = document.getElementById('taskInput').value.trim();
-            const workMins = parseInt(document.getElementById('workMins').value) || 15;
-            const restMins = parseInt(document.getElementById('restMins').value) || 5;
-
-            if (name) {
-                readyQ.push({
-                    id: Date.now(),
-                    name: name,
-                    totalSeconds: 0,
-                    workLimit: workMins * 60,
-                    restLimit: restMins * 60
-                });
-                saveToDisk();
-                render();
-                closeModal();
+            const { data: { user } } = await db.auth.getUser();
+            if (user) {
+                document.getElementById('overlay').style.display = 'none';
             }
-        }
-
-        function tick() {
-            if (isPaused) return;
-            if (state === "IDLE" && readyQ.length > 0) dispatchNext();
-
-            if (runningTask) {
-                elapsed++;
-                if (state === "WORKING") runningTask.totalSeconds++;
-
-                let currentLimit = (state === "SWITCHING") ? SWITCH_LIMIT :
-                                   (state === "RESTING") ? runningTask.restLimit :
-                                   runningTask.workLimit;
-
-                if (elapsed >= currentLimit) {
-                    playBeep();
-                    if (state === "WORKING") {
-                        state = "SWITCHING";
-                        elapsed = 0;
-                    } else if (state === "SWITCHING") {
-                        state = "RESTING";
-                        elapsed = 0;
-                    } else {
-                        contextSwitch();
-                    }
-                }
-                saveToDisk();
-                render();
-            }
-        }
-
-        function dispatchNext() {
-            if (readyQ.length === 0) return;
-            runningTask = readyQ.shift();
-            elapsed = 0;
-            state = "WORKING";
-            isPaused = false;
-            document.getElementById('pause-btn').innerText = "PAUSE_SYSTEM";
-            document.getElementById('pause-btn').className = "";
-            saveToDisk();
-        }
-
-        function contextSwitch() {
-            readyQ.push(runningTask);
-            runningTask = null;
-            state = "IDLE";
-            dispatchNext();
-        }
-
-        function completeTask(id) {
-            if (runningTask && runningTask.id === id) {
-                haltedQ.push(runningTask);
-                runningTask = null;
-                state = "IDLE";
-                isPaused = false;
-            } else {
-                const idx = readyQ.findIndex(t => t.id === id);
-                if (idx !== -1) haltedQ.push(readyQ.splice(idx, 1)[0]);
-            }
-            saveToDisk();
-            render();
         }
 
         function render() {
@@ -331,8 +368,8 @@
             let displayTime = 0;
 
             if (runningTask) {
-                if (state === "WORKING") displayTime = runningTask.workLimit - elapsed;
-                else if (state === "RESTING") displayTime = runningTask.restLimit - elapsed;
+                if (state === "WORKING") displayTime = runningTask.work_limit - elapsed;
+                else if (state === "RESTING") displayTime = runningTask.rest_limit - elapsed;
                 else if (state === "SWITCHING") displayTime = SWITCH_LIMIT - elapsed;
             }
 
@@ -343,12 +380,9 @@
             if (state === "IDLE") {
                 timerEl.innerText = "READY FOR DISPATCH";
                 timerEl.style.color = "var(--accent-orange)";
-                document.title = "IDLE | Scheduler";
             } else {
-                let statusPrefix = isPaused ? "PAUSED" : state;
-                timerEl.innerText = `${statusPrefix}: ${timeStr}`;
+                timerEl.innerText = `${isPaused ? "PAUSED" : state}: ${timeStr}`;
                 timerEl.style.color = isPaused ? "var(--accent-red)" : `var(--accent-${state.toLowerCase()})`;
-                document.title = `(${timeStr}) ${state}`;
             }
 
             const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
@@ -356,34 +390,22 @@
                 const col = document.getElementById(colId);
                 while (col.children.length > 1) col.removeChild(col.lastChild);
                 cols[colId].forEach(t => {
-                    const card = createCard(t);
+                    const card = document.createElement('div');
+                    card.className = 'card';
                     if (colId === 'running-col') card.classList.add(`active-${state.toLowerCase()}`);
+                    card.onclick = () => completeTask(t.id);
+                    card.innerHTML = `
+                        <div class="card-name">${t.name}</div>
+                        <div class="card-stats">${t.work_limit/60}m work / ${t.rest_limit/60}m rest</div>
+                        <div class="card-stats">Logged: ${Math.floor(t.total_seconds/60)}m</div>
+                    `;
                     col.appendChild(card);
                 });
             });
         }
 
-        function createCard(task) {
-            const div = document.createElement('div');
-            div.className = 'card';
-            div.onclick = () => completeTask(task.id);
-            div.innerHTML = `
-                <div class="card-name">${task.name}</div>
-                <div class="card-stats">${task.workLimit/60}m work / ${task.restLimit/60}m rest</div>
-                <div class="card-stats">Logged: ${Math.floor(task.totalSeconds/60)}m</div>
-            `;
-            return div;
-        }
-
-
-        loadFromDisk();
         setInterval(tick, 1000);
-
-        document.querySelectorAll('#modal input').forEach(input => {
-            input.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') addTask();
-            });
-        });
+        checkUser();
     </script>
 </body>
 </html>
