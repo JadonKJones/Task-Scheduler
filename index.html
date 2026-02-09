@@ -23,9 +23,12 @@
         .column { display: flex; flex-direction: column; gap: 15px; overflow-y: auto; }
         .col-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 5px; border-bottom: 1px solid #2D3447; padding-bottom: 5px; }
         .card { background: var(--card); padding: 20px; border-radius: 8px; border: 1px solid #2D3447; cursor: pointer; position: relative; }
-        .card.active-working { border: 2px solid var(--accent-blue); box-shadow: 0 0 10px var(--accent-blue); }
 
-        /* Custom Context Menu */
+        /* Active State Borders */
+        .card.active-working { border: 2px solid var(--accent-blue); box-shadow: 0 0 10px var(--accent-blue); }
+        .card.active-switching { border: 2px solid var(--accent-purple); box-shadow: 0 0 10px var(--accent-purple); }
+        .card.active-resting { border: 2px solid var(--accent-green); box-shadow: 0 0 10px var(--accent-green); }
+
         #context-menu {
             display: none; position: fixed; background: #1A1E2C; border: 1px solid var(--accent-orange);
             z-index: 2000; width: 150px; box-shadow: 5px 5px 15px rgba(0,0,0,0.5);
@@ -137,24 +140,29 @@
         async function signOut() { await db.auth.signOut(); location.reload(); }
 
         async function syncFromCloud() {
-            const { data: tasks, error } = await db.from('tasks').select('*').order('created_at', { ascending: true });
+            // Added sorting by 'last_start_time' so the oldest tasks (back of the line) come first
+            const { data: tasks, error } = await db.from('tasks')
+                .select('*')
+                .order('last_start_time', { ascending: true });
+
             if (error) return;
 
             readyQ = tasks.filter(t => t.status === 'ready');
-            runningTask = tasks.find(t => t.status === 'running') || null;
+            const cloudRunning = tasks.find(t => t.status === 'running') || null;
             haltedQ = tasks.filter(t => t.status === 'done');
 
-            if (runningTask) {
+            if (!runningTask && cloudRunning) {
+                runningTask = cloudRunning;
                 state = "WORKING";
-                const lastStart = new Date(runningTask.last_start_time).getTime();
-                const now = new Date().getTime();
-                elapsed = Math.floor((now - lastStart) / 1000);
+                elapsed = 0;
             }
             render();
         }
 
+
+
         async function updateTaskInDB(task, newStatus) {
-            await db.from('tasks').update({
+            return await db.from('tasks').update({
                 status: newStatus,
                 total_seconds: task.total_seconds,
                 last_start_time: new Date().toISOString()
@@ -166,7 +174,7 @@
             const workMins = parseInt(document.getElementById('workMins').value) || 15;
             const restMins = parseInt(document.getElementById('restMins').value) || 5;
             if (name) {
-                await db.from('tasks').insert([{ name, work_limit: workMins * 60, rest_limit: restMins * 60, status: 'ready' }]);
+                await db.from('tasks').insert([{ name, work_limit: workMins * 60, rest_limit: restMins * 60, status: 'ready', total_seconds: 0 }]);
                 closeModal();
                 syncFromCloud();
             }
@@ -174,62 +182,96 @@
 
         function tick() {
             if (isPaused) return;
-            if (state === "IDLE" && readyQ.length > 0) { dispatchNext(); return; }
+
+            if (state === "IDLE") {
+                if (readyQ.length > 0) dispatchNext();
+                return;
+            }
 
             if (runningTask) {
                 elapsed++;
-                if (state === "WORKING") runningTask.total_seconds++;
+                if (state === "WORKING") {
+                    runningTask.total_seconds++;
+                }
 
                 let currentLimit = (state === "SWITCHING") ? SWITCH_LIMIT : (state === "RESTING") ? runningTask.rest_limit : runningTask.work_limit;
 
                 if (elapsed >= currentLimit) {
                     playBeep();
-                    if (state === "WORKING") { state = "SWITCHING"; elapsed = 0; updateTaskInDB(runningTask, 'running'); }
-                    else if (state === "SWITCHING") { state = "RESTING"; elapsed = 0; updateTaskInDB(runningTask, 'running'); }
-                    else { contextSwitch(); }
+                    if (state === "WORKING") {
+                        state = "SWITCHING";
+                        elapsed = 0;
+                        updateTaskInDB(runningTask, 'running');
+                    }
+                    else if (state === "SWITCHING") {
+                        state = "RESTING";
+                        elapsed = 0;
+                        updateTaskInDB(runningTask, 'running');
+                    }
+                    else {
+                        contextSwitch();
+                    }
                 }
                 render();
             }
         }
 
         async function dispatchNext() {
-            if (readyQ.length === 0) return;
-            runningTask = readyQ[0];
+            if (readyQ.length === 0 || runningTask) return;
+
+            runningTask = readyQ.shift();
             state = "WORKING";
             elapsed = 0;
+
             await updateTaskInDB(runningTask, 'running');
-            syncFromCloud();
+            render();
         }
 
-        async function contextSwitch() {
-            const task = runningTask;
+       async function contextSwitch() {
+            if (!runningTask) return;
+
+            const taskToMove = runningTask;
             runningTask = null;
             state = "IDLE";
-            await updateTaskInDB(task, 'ready');
-            syncFromCloud();
+            elapsed = 0;
+
+            // Update the DB - this also updates 'last_start_time' via our helper
+            // which effectively puts it at the back of the queue for the next sync
+            await updateTaskInDB(taskToMove, 'ready');
+
+            // Give the DB a tiny heartbeat to process before pulling the new queue order
+            setTimeout(async () => {
+                await syncFromCloud();
+            }, 500);
         }
 
         async function completeTask(id) {
             const task = (runningTask && runningTask.id === id) ? runningTask : readyQ.find(t => t.id === id);
             if (task) {
                 await updateTaskInDB(task, 'done');
-                if (runningTask?.id === id) { runningTask = null; state = "IDLE"; }
+                if (runningTask && runningTask.id === id) {
+                    runningTask = null;
+                    state = "IDLE";
+                    elapsed = 0;
+                }
                 syncFromCloud();
             }
         }
 
-        // --- Context Menu Logic ---
         window.addEventListener('contextmenu', e => {
             const card = e.target.closest('.card');
             if (card) {
                 e.preventDefault();
                 const taskId = card.getAttribute('data-id');
-                contextTask = [...readyQ, ...haltedQ, runningTask].find(t => t && t.id == taskId);
+                // Look in all lists for the task
+                contextTask = [...readyQ, ...haltedQ, (runningTask ? [runningTask] : [])].flat().find(t => t && t.id == taskId);
 
-                const menu = document.getElementById('context-menu');
-                menu.style.display = 'block';
-                menu.style.left = e.pageX + 'px';
-                menu.style.top = e.pageY + 'px';
+                if (contextTask) {
+                    const menu = document.getElementById('context-menu');
+                    menu.style.display = 'block';
+                    menu.style.left = e.pageX + 'px';
+                    menu.style.top = e.pageY + 'px';
+                }
             }
         });
 
@@ -240,7 +282,10 @@
         document.getElementById('menu-delete').onclick = async () => {
             if (contextTask && confirm(`Delete "${contextTask.name}" forever?`)) {
                 await db.from('tasks').delete().eq('id', contextTask.id);
-                if (runningTask?.id === contextTask.id) { runningTask = null; state = "IDLE"; }
+                if (runningTask && runningTask.id === contextTask.id) {
+                    runningTask = null;
+                    state = "IDLE";
+                }
                 syncFromCloud();
             }
         };
@@ -262,7 +307,24 @@
             const work = parseInt(document.getElementById('editWorkMins').value) * 60;
             const rest = parseInt(document.getElementById('editRestMins').value) * 60;
 
-            await db.from('tasks').update({ name, work_limit: work, rest_limit: rest }).eq('id', id);
+            const { error } = await db.from('tasks').update({
+                name: name,
+                work_limit: work,
+                rest_limit: rest
+            }).eq('id', id);
+
+            if (error) {
+                alert("Update Error: " + error.message);
+                return;
+            }
+
+            // Patch local copy if it's the one running
+            if (runningTask && runningTask.id == id) {
+                runningTask.name = name;
+                runningTask.work_limit = work;
+                runningTask.rest_limit = rest;
+            }
+
             closeEditModal();
             syncFromCloud();
         }
@@ -270,18 +332,37 @@
         function closeEditModal() {
             document.getElementById('edit-modal').style.display = 'none';
             document.getElementById('overlay').style.display = 'none';
+            contextTask = null;
         }
 
         function playBeep() {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const osc = audioCtx.createOscillator();
-            osc.type = 'square'; osc.frequency.setValueAtTime(880, audioCtx.currentTime);
-            osc.connect(audioCtx.destination); osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+                osc.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.2);
+            } catch(e) {}
         }
 
-        function togglePause() { isPaused = !isPaused; render(); }
-        function openModal() { document.getElementById('modal').style.display = 'block'; document.getElementById('overlay').style.display = 'block'; }
-        async function closeModal() { document.getElementById('modal').style.display = 'none'; const { data: { user } } = await db.auth.getUser(); if (user) document.getElementById('overlay').style.display = 'none'; }
+        function togglePause() {
+            isPaused = !isPaused;
+            document.getElementById('pause-btn').innerText = isPaused ? "RESUME_SYSTEM" : "PAUSE_SYSTEM";
+            render();
+        }
+
+        function openModal() {
+            document.getElementById('modal').style.display = 'block';
+            document.getElementById('overlay').style.display = 'block';
+        }
+
+        async function closeModal() {
+            document.getElementById('modal').style.display = 'none';
+            const { data: { user } } = await db.auth.getUser();
+            if (user) document.getElementById('overlay').style.display = 'none';
+        }
 
         function render() {
             const timerEl = document.getElementById('timer-display');
@@ -292,12 +373,18 @@
             }
             const m = Math.floor(Math.max(0, displayTime) / 60).toString().padStart(2, '0');
             const s = (Math.max(0, displayTime) % 60).toString().padStart(2, '0');
-            timerEl.innerText = state === "IDLE" ? "READY" : `${state}: ${m}:${s}`;
+
+            if (isPaused) {
+                timerEl.innerText = `PAUSED: ${m}:${s}`;
+            } else {
+                timerEl.innerText = state === "IDLE" ? "READY" : `${state}: ${m}:${s}`;
+            }
 
             const cols = { 'ready-col': readyQ, 'running-col': runningTask ? [runningTask] : [], 'done-col': haltedQ };
             Object.keys(cols).forEach(colId => {
                 const col = document.getElementById(colId);
                 while (col.children.length > 1) col.removeChild(col.lastChild);
+
                 cols[colId].forEach(t => {
                     const card = document.createElement('div');
                     card.className = 'card';
@@ -307,7 +394,7 @@
                     card.innerHTML = `
                         <div class="card-name">${t.name}</div>
                         <div class="card-stats">${t.work_limit/60}m work / ${t.rest_limit/60}m rest</div>
-                        <div class="card-stats">Logged: ${Math.floor(t.total_seconds/60)}m</div>
+                        <div class="card-stats">Logged: ${Math.floor((t.total_seconds || 0)/60)}m</div>
                     `;
                     col.appendChild(card);
                 });
